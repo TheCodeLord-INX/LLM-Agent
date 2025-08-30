@@ -7,9 +7,6 @@ class GyaanSetu {
     constructor() {
         this.version = '2.8.0';
         this.initialized = false;
-        // Set your default API key for AI Pipe here (keep it secret)
-        this._defaultAIPipeApiKey = 'eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjIzZjIwMDA4MDlAZHMuc3R1ZHkuaWl0bS5hYy5pbiJ9.rM6yw4sGvTsipmTCBMUCKvE4KDioeM_UrnXebvM6OeA'; // <-- SET YOUR KEY HERE
-        this._sessionUserApiKey = null; // Only for current session, never saved
         this.state = new Proxy({
             conversations: new Map(),
             currentConversationId: null,
@@ -74,7 +71,6 @@ class GyaanSetu {
     }
 
     getDefaultSettings() {
-        // Never expose the default API key in settings or localStorage
         return {
             llm: { provider: 'aipipe', apiKey: '', model: 'default', maxTokens: 2000, temperature: 0.7 },
             ui: { theme: 'auto', animationsEnabled: true, soundEnabled: false, fontSize: 'medium' },
@@ -698,8 +694,7 @@ class GyaanSetu {
         const tempEl = document.getElementById('temperature');
 
         if (llmProv) llmProv.value = s.llm.provider || 'aipipe';
-        // Never show the default API key in the UI
-        if (apiKeyEl) apiKeyEl.value = '';
+        if (apiKeyEl) apiKeyEl.value = s.llm.apiKey || '';
         if (maxTokensEl) maxTokensEl.value = s.llm.maxTokens || 2000;
         if (tempEl) tempEl.value = s.llm.temperature || 0.7;
 
@@ -725,12 +720,7 @@ class GyaanSetu {
     updateSettingsFromForm() {
         const s = this.state.settings || this.getDefaultSettings();
         s.llm.provider = document.getElementById('llm-provider')?.value || s.llm.provider;
-        // Only update the session user API key if user entered one, never save it to settings
-        const userKey = document.getElementById('api-key')?.value?.trim();
-        if (userKey) {
-            this._sessionUserApiKey = userKey;
-        }
-        // Never save any apiKey to settings.llm.apiKey
+        s.llm.apiKey = document.getElementById('api-key')?.value || s.llm.apiKey;
         s.llm.model = document.getElementById('model-name')?.value || s.llm.model;
         s.llm.maxTokens = parseInt(document.getElementById('max-tokens')?.value || s.llm.maxTokens, 10);
         s.llm.temperature = parseFloat(document.getElementById('temperature')?.value || s.llm.temperature);
@@ -753,10 +743,7 @@ class GyaanSetu {
         try {
             this.updateSettingsFromForm();
             this.applySettings();
-            // Never save any apiKey to localStorage
-            const settingsToSave = JSON.parse(JSON.stringify(this.state.settings));
-            if (settingsToSave.llm) settingsToSave.llm.apiKey = '';
-            localStorage.setItem('agentflow_settings', JSON.stringify(settingsToSave));
+            localStorage.setItem('agentflow_settings', JSON.stringify(this.state.settings));
             this.showToast('success', 'Settings Saved', 'Your settings have been updated.');
             this.closeSettings();
         } catch (e) {
@@ -785,8 +772,6 @@ class GyaanSetu {
                     voice: { ...this.getDefaultSettings().voice, ...(loaded.voice || {}) },
                     advanced: { ...this.getDefaultSettings().advanced, ...(loaded.advanced || {}) }
                 };
-                // Always clear apiKey from loaded settings
-                if (this.state.settings.llm) this.state.settings.llm.apiKey = '';
             }
         } catch (e) {
             console.warn('Could not load settings, using defaults', e);
@@ -862,8 +847,7 @@ class GyaanSetu {
 
     // AI Pipe models fetch — attempts to list models via proxy endpoints
     async fetchAIpipeModels() {
-        // Use the correct API key logic for AI Pipe
-        let token = this._sessionUserApiKey || this._defaultAIPipeApiKey;
+        const token = document.getElementById('api-key')?.value;
         if (!token) throw new Error("AI Pipe token required");
         // Try OpenRouter models endpoint first then OpenAI models endpoint
         const candidateSets = [];
@@ -932,85 +916,78 @@ class GyaanSetu {
         this.elements.sendButton.innerHTML = this.state.isProcessing ? '<i class="fas fa-spinner fa-spin"></i>' : '<i class="fas fa-paper-plane"></i>';
     }
 
-    async callLLM(conversation) {
-        // Build messages in provider-agnostic shape (OpenAI chat style)
-        const messagesForApi = conversation.messages.map(m => {
-            // keep tool & system & user & assistant roles
-            if (m.role === 'tool') return { role: 'system', content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) };
-            return { role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) };
-        }).filter(m => !!m.content);
+    toggleTheme() {
+        const current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+        const newTheme = current === 'dark' ? 'light' : 'dark';
+        this.state.settings.ui.theme = newTheme;
+        this.applySettings();
+    }
 
-        const { provider, model, maxTokens, temperature } = this.state.settings.llm || {};
-        let apiKey = '';
-        // Use correct API key logic
-        if (provider === 'aipipe') {
-            apiKey = this._sessionUserApiKey || this._defaultAIPipeApiKey;
-        } else {
-            apiKey = document.getElementById('api-key')?.value?.trim() || '';
-        }
-        if (!provider) throw new Error('No LLM provider configured.');
+    updateTheme() {
+        const themePref = this.state.settings?.ui?.theme || 'auto';
+        const systemTheme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        const theme = themePref === 'auto' ? systemTheme : themePref;
+        document.documentElement.setAttribute('data-theme', theme);
+        const icon = document.getElementById('theme-toggle')?.querySelector('i');
+        if (icon) icon.className = theme === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
+    }
 
-        // Demo mode fallback
-        if (!apiKey) {
-            // return a local mock response
-            return { choices: [{ message: { content: "Demo response: provide an API key in settings to use real models." } }] };
-        }
-
-        let apiUrl, headers = { 'Content-Type': 'application/json' }, body;
-
-        switch (provider) {
-            case 'openai':
-                apiUrl = 'https://api.openai.com/v1/chat/completions';
-                headers.Authorization = `Bearer ${apiKey}`;
-                body = { model, messages: messagesForApi, max_tokens: maxTokens, temperature };
-                break;
-
-            case 'google':
-                // maps to Google Generative API
-                apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-                // google uses API key in query string; keep content
-                body = {
-                    messages: messagesForApi.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', content: m.content })),
-                    temperature, maxOutputTokens: maxTokens
-                };
-                break;
-
-            case 'aipipe':
-                // AI Pipe acts as a proxy. We'll send to its OpenRouter-compatible endpoint by default.
-                // AI Pipe docs: https://aipipe.org/  — supports endpoints like /openrouter/v1/chat/completions and /openai/v1/...
-                // We'll prioritize openrouter-style endpoint
-                apiUrl = 'https://aipipe.org/openrouter/v1/chat/completions';
-                headers.Authorization = `Bearer ${apiKey}`;
-                body = {
-                    model: model || 'openai/gpt-4o-mini', // fallback
-                    messages: messagesForApi.map(m => ({ role: m.role, content: m.content })),
-                    max_tokens: maxTokens,
-                    temperature
-                };
-                break;
-
-            default:
-                throw new Error(`Unsupported provider: ${provider}`);
-        }
-
-        // POST request with retries for transient network errors
+    toggleApiKeyVisibility(event) {
         try {
-            const resp = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify(body) });
-            if (!resp.ok) {
-                // attempt to parse error body
-                let errText = `${resp.status} ${resp.statusText}`;
-                try { const errJson = await resp.json(); errText = errJson.error?.message || JSON.stringify(errJson); } catch (_) {}
-                // throw new Error(`API Error (${resp.status}): ${errText}`);
-                throw new Error(`Model not supported for your API key — change model in settings. (Status: ${resp.status}, Details: ${errText})`);
-
+            const input = event.currentTarget.previousElementSibling;
+            const icon = event.currentTarget.querySelector('i');
+            if (!input) return;
+            if (input.type === 'password') {
+                input.type = 'text';
+                icon.classList.replace('fa-eye', 'fa-eye-slash');
+            } else {
+                input.type = 'password';
+                icon.classList.replace('fa-eye-slash', 'fa-eye');
             }
-            const data = await resp.json();
-            return data;
-        } catch (err) {
-            // bubble up to caller
-            throw new Error(err.message || 'Network error');
+        } catch (e) {}
+    }
+
+    toggleFullscreen() {
+        if (!document.fullscreenElement) {
+            document.documentElement.requestFullscreen().catch(err => console.error(`Fullscreen error: ${err.message}`));
+        } else if (document.exitFullscreen) {
+            document.exitFullscreen();
         }
     }
+
+    toggleVoiceInput() {
+        if (!this.speechRecognition) return this.showToast('error', 'Voice Not Supported', 'Browser does not support SpeechRecognition.');
+        this.state.ui.voiceEnabled ? this.stopVoiceInput() : this.startVoiceInput();
+    }
+
+    startVoiceInput() {
+        try {
+            this.state.ui.voiceEnabled = true;
+            this.speechRecognition.lang = this.state.settings.voice.language || 'en-US';
+            this.speechRecognition.start();
+            document.querySelectorAll('#voice-toggle, #voice-input').forEach(btn => btn?.classList?.add('active'));
+        } catch (e) {
+            this.showToast('error', 'Voice Error', e.message || 'Could not start voice input.');
+        }
+    }
+
+    stopVoiceInput() {
+        try {
+            this.state.ui.voiceEnabled = false;
+            this.speechRecognition?.stop();
+            document.querySelectorAll('#voice-toggle, #voice-input').forEach(btn => btn?.classList?.remove('active'));
+        } catch (e) {}
+    }
+
+    // ---------- utilities ----------
+    debounce(func, delay) {
+        let timeout;
+        return (...args) => {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => func.apply(this, args), delay);
+        };
+    }
+
     showTypingIndicator() { this.elements.typingIndicator?.classList.add('active'); }
     hideTypingIndicator() { this.elements.typingIndicator?.classList.remove('active'); }
     showWelcomeScreen() { if (this.elements.welcomeScreen) this.elements.welcomeScreen.style.display = 'flex'; }
